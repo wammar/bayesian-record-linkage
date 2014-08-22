@@ -9,18 +9,20 @@ import scipy
 import scipy.stats
 import scipy.special
 import random
+import csv
 
 # observed/input variables
 a = 1     # first parameter of the beta prior
 b = 1     # second parameter of the beta prior
 c = [-1.0, -1.0] # feature weights -- TODO: learn this from data
 x = []    # list of observed records, each of which is another list, all internal lists should be consistent with field_types
-m = 0     # number of latent records
-field_types = [str, int, float] # field types for each observed/latent record
-max_iter_count = 100
+m = 950     # number of latent records
+field_types = [str, str, int, int, int] # field types for each observed/latent record
+max_iter_count = 10000
 
 # latent variables
-y = []             # list of latent records, each of which is another list, all internal lists should be consistent with field_types
+y = []             # list of latent records, each of which is another list, 
+                   # all internal lists should be consistent with field_types
 Lambda = []        # list of "pointers" to the latent record that corresponds to an observed record
                    # Lambda[i] = j <=> observed record x[i] was generated from latent record y[j]
 z = []             # list of lists of booleans. the size of internal lists should match field_types
@@ -40,14 +42,23 @@ x_domain = []      # list of sets. x_domain[l] is the set of observed values at 
 iter_count = 0 
 
 def set_observables(args):
-  global x_domain, x, m
-  # set number of unique latent records
-  m = 2
+  global x_domain, x
 
   # read the observed records to set x
-  x.append( ['kartik', 10, 5.0] )
-  x.append( ['waleed', 20, 10.5] )
-  x.append( ['kartek', 11, 5.1] )
+  if args.observed_records:
+    observed_records_file = io.open(args.observed_records, encoding='utf8', mode='r')
+    observed_records_reader = csv.reader(observed_records_file, delimiter=',')
+    headers = observed_records_reader.next()
+    assert len(headers) == len(field_types+1)
+    
+    
+    for observed_record in observed_records_reader:
+      x.append(observed_record[1:])
+      print observed_record
+  else:
+    x.append( ['kartik', 10, 5.0] )
+    x.append( ['waleed', 20, 10.5] )
+    x.append( ['kartek', 11, 5.1] )
   
   # populate x_domain
   x_domain = [set([rec[l] for rec in x]) for l in xrange(len(field_types))] 
