@@ -16,7 +16,7 @@ a = 1     # first parameter of the beta prior
 b = 1     # second parameter of the beta prior
 c = [-1.0, -1.0] # feature weights -- TODO: learn this from data
 x = []    # list of observed records, each of which is another list, all internal lists should be consistent with field_types
-m = 950     # number of latent records
+m = 450     # number of latent records
 field_types = [str, str, int, int, int] # field types for each observed/latent record
 max_iter_count = 10000
 
@@ -49,17 +49,26 @@ def set_observables(args):
     observed_records_file = io.open(args.observed_records, encoding='utf8', mode='r')
     observed_records_reader = csv.reader(observed_records_file, delimiter=',')
     headers = observed_records_reader.next()
-    assert len(headers) == len(field_types+1)
-    
-    
+    assert len(headers) == len(field_types)+1
+
     for observed_record in observed_records_reader:
+      for i in range(1, len(observed_record)):
+        if field_types[i-1] == int:
+          observed_record[i] = int(observed_record[i])
+        elif field_types[i-1] == float:
+          observed_records[i] = float(observed_record[i])
+        elif field_types[i-1] == str:
+          pass
+        else:
+          assert False
       x.append(observed_record[1:])
-      print observed_record
+      print observed_record[1:]
   else:
     x.append( ['kartik', 10, 5.0] )
     x.append( ['waleed', 20, 10.5] )
     x.append( ['kartek', 11, 5.1] )
-  
+
+  print '|observed records| = ', len(x)
   # populate x_domain
   x_domain = [set([rec[l] for rec in x]) for l in xrange(len(field_types))] 
   
@@ -120,7 +129,7 @@ def sample_key_from_multinomial_dict(multinomial):
 def resample_Lambda(i):
   global Lambda, Lambda_inverse
 
-  print 'inside resample_Lambda(', i, ')'
+  #print 'inside resample_Lambda(', i, ')'
   # first, compute the posterior distribution of lambda_i
   posteriors = []
   for j in xrange(m):
@@ -154,12 +163,12 @@ def resample_Lambda(i):
   # update inverse lambda
   Lambda_inverse[old_lambda_i] -= set([i])
   Lambda_inverse[Lambda[i]] |= set([i])
-  print 'leaving resample_Lambda(', i, ')'
+  #print 'leaving resample_Lambda(', i, ')'
   
 def resample_z(i,l):
   global z
 
-  print 'inside resample_z(', i, ', ', l, ')'
+  #print 'inside resample_z(', i, ', ', l, ')'
   # first, compute the posterior distribution of z_{i,l}
   delta = 1.0 if x[i][l] == y[Lambda[i]][l] else 0.0
   posteriors = []
@@ -176,12 +185,12 @@ def resample_z(i,l):
     z[i][l] = False
   else:
     z[i][l] = True
-  print 'leaving resample_z(', i, ', ', l, ')'
+  #print 'leaving resample_z(', i, ', ', l, ')'
   
 def resample_y(i,l):
   global y
 
-  print 'inside resample_y(', i, ',', l, ')'
+  #print 'inside resample_y(', i, ',', l, ')'
 
   # find the indexes of observed records which are currently aligned to this latent record
   aligned_observed_record_indexes = Lambda_inverse[i]
@@ -202,29 +211,32 @@ def resample_y(i,l):
   
   # now, sample a value from the posterior
   y[i][l] = sample_key_from_multinomial_dict(posteriors)
-  print 'inside resample_y(', i, ',', l, ')'
+  #print 'inside resample_y(', i, ',', l, ')'
 
 def check_convergence():
   global iter_count
+  if iter_count %100 == 0:
+    print 'iter_count = ', iter_count
+    print_linkage_structure()
   print '=================== END OF ITERATION', iter_count, ' ===================='
   iter_count += 1
   return iter_count > max_iter_count
     
 def print_linkage_structure():
-#  print 'CURRENT LINKAGE STRUCTURE:'
+  print 'CURRENT LINKAGE STRUCTURE:'
   print
-  print 'x=', x
-  print 'y=', y
-  print 'z=', z
-  print 'Lambda=', Lambda
-  print
-#  for j in xrange(len(Lambda_inverse)):
-#    if len(Lambda_inverse[j]) > 0:
-#      print 'latent_index={}\nobserved_indexes={}\nlatent_record={}\nobserved_records={}\n\n'.format(j,
-#                                                                                                 Lambda_inverse[j],
-#                                                                                                 y[j],
-#                                                                                                 '\n'.join([str(x[i]) for i in Lambda_inverse[j]])) 
-#  print 'END OF CURRENT LINKAGE STRUCTURE ====================='
+#  print 'x=', x
+#  print 'y=', y
+#  print 'z=', z
+#  print 'Lambda=', Lambda
+#  print
+  for j in xrange(len(Lambda_inverse)):
+    if len(Lambda_inverse[j]) > 0:
+      print 'latent_index={}\nobserved_indexes={}\nlatent_record={}\nobserved_records={}\n\n'.format(j,
+                                                                                                 Lambda_inverse[j],
+                                                                                                 y[j],
+                                                                                                 '\n'.join([str(x[i]) for i in Lambda_inverse[j]])) 
+  print 'END OF CURRENT LINKAGE STRUCTURE ====================='
 
 def score(l, x_value, y_value):
   if field_types[l] == str:
@@ -270,20 +282,18 @@ if __name__ == "__main__":
   init_latents()
   while True:
 
-    print_linkage_structure()
-
     for i in xrange(len(x)):
       resample_Lambda(i)
-      print 'Lambda[', i, ']=', Lambda[i]
+      #print 'Lambda[', i, ']=', Lambda[i]
       for l in xrange(len(field_types)):
         resample_z(i,l)
-        print 'z[', i, '][', l, ']=', z[i][l]
+        #print 'z[', i, '][', l, ']=', z[i][l]
         
     for j in xrange(m):
       for l in xrange(len(field_types)):
         resample_y(j,l)
-        print 'y[', j, '][', l, ']=', y[j][l]
-        print_linkage_structure()
+        #print 'y[', j, '][', l, ']=', y[j][l]
+        #print_linkage_structure()
 
     if check_convergence(): break
 
