@@ -10,11 +10,13 @@ import scipy.stats
 import scipy.special
 import random
 import csv
+import math
 
 # observed/input variables
 a = 1     # first parameter of the beta prior
 b = 1     # second parameter of the beta prior
 c = [-1.0, -1.0] # feature weights -- TODO: learn this from data
+#                                     TODO: index features using feature strings instead of indeces. make this a dictionary instead of an array
 x = []    # list of observed records, each of which is another list, all internal lists should be consistent with field_types
 m = 450     # number of latent records
 field_types = [str, str, int, int, int] # field types for each observed/latent record
@@ -40,6 +42,82 @@ distortion = {}    # distortion[(l,y')] => the distortion distribution of x' | y
                    #                       which is a defaultdict
 x_domain = []      # list of sets. x_domain[l] is the set of observed values at field l 
 iter_count = 0 
+
+# must be called after set_observables() has been called
+def fit_feature_weights(args):
+  global c
+
+  # only fit feature weights when training pairs of similar observed records are provided
+  if not args.training_pairs: return 
+
+  # read similar pairs
+  original, distorted = [], []
+  for line in open(args.training_pairs):
+    # indexes of pairs of similar records are written in each line, separated with a comma 
+    index1, index2 = line.strip().split(',')
+    # indexes in the file are one-based, but we use zero-based indexes internally, so:
+    index1, index2 = int(index1)-1, int(index2)-1
+    # first, assume index2 is a noisy copy of index1    
+    original.append( list(x[index1]) )
+    distorted.append( list(x[index2]) )
+    # then, assume index1 is a noisy copy of index2
+    original.append( list(x[index2]) )
+    distorted.append( list(x[index1]) )
+  assert len(original) == len(distorted)
+    
+  # use gradient descent to optimize feature weights
+  gradient_ascent_converged = False
+  iter_count = 0
+  while not gradient_ascent_converged:
+    likelihood = 0.0
+    gradient = [0.0 for weight in c]
+
+    # compute likelihood and gradient
+    for i in xrange(len(original)):
+      for l in xrange(len(field_types)):
+
+        # positive enforcement 
+        x_value, y_value = distorted[i][l], original[i][l]
+        likelihood += score(l, x_value, y_value)
+        if field_types[l] == str:
+          gradient[0] += Levenshtein.ratio(x_value, y_value)
+        else:
+          gradient[1] += (x_value - y_value) * (x_value - y_value)
+
+        # compute the partition function for the distortion model conditional on y_value
+        partition = 0.0
+        for x_value in x_domain[l]:
+          partition += math.e**score(l, x_value, y_value)
+
+        # negative enforcement
+        likelihood -= math.log( partition )
+        for x_value in x_domain[l]:
+          distortion_prob = (math.e**score(l, x_value, y_value)) / partition
+          if field_types[l] == str:
+            gradient[0] -= distortion_prob * Levenshtein.ratio(x_value, y_value)
+          else:
+            gradient[1] -= distortion_prob * (x_value - y_value) * (x_value - y_value)
+          # hopefully, these probabilities will keep increasing as we fit c
+          if x_value == distorted[i][l]: print 'p(', distorted[i][l], '|', original[i][l], ')=', distortion_prob
+    
+    # done computing likelihood and gradient
+    learning_rate = 0.1
+    for j in xrange(len(c)):
+      c[j] += gradient[j] * learning_rate # check the sign
+
+    print
+    print 'completed gradient ascent iteration #', iter_count 
+    print 'likelihood = ', likelihood
+    print 'c = ', c
+
+    # check convergence
+    iter_count += 1
+    if iter_count == 100:
+      gradient_ascent_converged = True
+
+  # congrat! gradient ascent has converged
+  print 'done with gradient ascent'
+  exit(1)
 
 def set_observables(args):
   global x_domain, x
@@ -271,12 +349,14 @@ def parse_arguments():
   # parse/validate arguments
   argparser = argparse.ArgumentParser()
   argparser.add_argument("-or", "--observed-records", required=True, help="observed records")
+  argparser.add_argument("-tp", "--training-pairs", required=False, help="optimize feature weights to maximize the likelihood of the distortion model based on these pairs of similar records")
   args = argparser.parse_args()
   return args
 
 if __name__ == "__main__":
   args = parse_arguments()
   set_observables(args)
+  fit_feature_weights(args)
   precompute_distortions()
   precompute_empiricals()
   init_latents()
