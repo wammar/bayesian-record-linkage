@@ -11,6 +11,7 @@ import scipy.special
 import random
 import csv
 import math
+import numpy
 
 # observed/input variables
 a = 1     # first parameter of the beta prior
@@ -43,6 +44,15 @@ distortion = {}    # distortion[(l,y')] => the distortion distribution of x' | y
 x_domain = []      # list of sets. x_domain[l] is the set of observed values at field l 
 iter_count = 0 
 
+def compute_distortion_feature(k, x_value, y_value):
+  if k == 0:
+    print 'levenshtein(', x_value, ', ', y_value, ')=',  Levenshtein.ratio(x_value, y_value)
+    return Levenshtein.ratio(x_value, y_value)
+  elif k == 1:
+    return Levenshtein.ratio(str(x_value), str(y_value))
+  else:
+    assert False
+
 # must be called after set_observables() has been called
 def fit_feature_weights(args):
   global c
@@ -69,34 +79,36 @@ def fit_feature_weights(args):
   gradient_ascent_converged = False
   iter_count = 0
   while not gradient_ascent_converged:
-    likelihood = 0.0
+    log_likelihood = 0.0
     gradient = [0.0 for weight in c]
 
     # compute likelihood and gradient
     for i in xrange(len(original)):
       for l in xrange(len(field_types)):
+        # only use distorted values
+        if distorted[i][l] == original[i][l]: continue
 
         # positive enforcement 
         x_value, y_value = distorted[i][l], original[i][l]
-        likelihood += score(l, x_value, y_value)
+        log_likelihood += score(l, x_value, y_value)
         if field_types[l] == str:
-          gradient[0] += Levenshtein.ratio(x_value, y_value)
+          gradient[0] += compute_distortion_feature(0, x_value, y_value)
         else:
-          gradient[1] += (x_value - y_value) * (x_value - y_value)
+          gradient[1] += compute_distortion_feature(1, x_value, y_value)
 
         # compute the partition function for the distortion model conditional on y_value
-        partition = 0.0
+        log_partition = -300
         for x_value in x_domain[l]:
-          partition += math.e**score(l, x_value, y_value)
-
+          log_partition = numpy.logaddexp(log_partition, score(l, x_value, y_value))
+          
         # negative enforcement
-        likelihood -= math.log( partition )
+        log_likelihood -= log_partition
         for x_value in x_domain[l]:
-          distortion_prob = (math.e**score(l, x_value, y_value)) / partition
+          distortion_prob = math.e ** (score(l, x_value, y_value) - log_partition)
           if field_types[l] == str:
-            gradient[0] -= distortion_prob * Levenshtein.ratio(x_value, y_value)
+            gradient[0] -= distortion_prob * compute_distortion_feature(0, x_value, y_value)
           else:
-            gradient[1] -= distortion_prob * (x_value - y_value) * (x_value - y_value)
+            gradient[1] -= distortion_prob * compute_distortion_feature(1, x_value, y_value)
           # hopefully, these probabilities will keep increasing as we fit c
           if x_value == distorted[i][l]: print 'p(', distorted[i][l], '|', original[i][l], ')=', distortion_prob
     
@@ -107,7 +119,8 @@ def fit_feature_weights(args):
 
     print
     print 'completed gradient ascent iteration #', iter_count 
-    print 'likelihood = ', likelihood
+    print 'gradient = ', gradient
+    print 'log-likelihood = ', log_likelihood
     print 'c = ', c
 
     # check convergence
@@ -318,9 +331,9 @@ def print_linkage_structure():
 
 def score(l, x_value, y_value):
   if field_types[l] == str:
-    return c[0] * Levenshtein.ratio(x_value, y_value)
+    return c[0] * compute_distortion_feature(0, x_value, y_value)
   else:
-    return c[1] * (x_value - y_value) * (x_value - y_value)
+    return c[1] * compute_distortion_feature(1, x_value, y_value)
 
 def precompute_distortions():
   global distortions
