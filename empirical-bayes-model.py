@@ -1,10 +1,11 @@
 import re
 import time
+from datetime import datetime
 import io
 import sys
 import argparse
 from collections import defaultdict
-import Levenshtein
+#import Levenshtein
 import scipy
 import scipy.stats
 import scipy.special
@@ -12,16 +13,31 @@ import random
 import csv
 import math
 import numpy
+import fileinput
+import cProfile
+import threading
+
+# feature prefixes
+STRING_SIMILARITY = 'similarity'
+SIMILAR_MINUS_DIFFERENT_CHARS_COUNT = 'similar-diff'
+DIFFERENT_CHARS = 'diffs'
+SUBSTRING = 'sub'
+RELATIVE_NUMERIC_DIFF = 'rel-diff'
 
 # observed/input variables
 a = 1     # first parameter of the beta prior
 b = 1     # second parameter of the beta prior
-c = [-1.0, -1.0] # feature weights -- TODO: learn this from data
-#                                     TODO: index features using feature strings instead of indeces. make this a dictionary instead of an array
+
+c = defaultdict(float)    # feature weights
+l2_strength = 0.1        # l2 regularization strength
+learning_rate = 0.1       # learning rate for gradient ascent
+
 x = []    # list of observed records, each of which is another list, all internal lists should be consistent with field_types
-m = 450     # number of latent records
+
+m = 450   # number of latent records
 field_types = [str, str, int, int, int] # field types for each observed/latent record
-max_iter_count = 10000
+max_iter_count = 10
+threads_count = 1
 
 # latent variables
 y = []             # list of latent records, each of which is another list, 
@@ -43,15 +59,7 @@ distortion = {}    # distortion[(l,y')] => the distortion distribution of x' | y
                    #                       which is a defaultdict
 x_domain = []      # list of sets. x_domain[l] is the set of observed values at field l 
 iter_count = 0 
-
-def compute_distortion_feature(k, x_value, y_value):
-  if k == 0:
-    print 'levenshtein(', x_value, ', ', y_value, ')=',  Levenshtein.ratio(x_value, y_value)
-    return Levenshtein.ratio(x_value, y_value)
-  elif k == 1:
-    return Levenshtein.ratio(str(x_value), str(y_value))
-  else:
-    assert False
+total_time, avg_time, prev_timestamp = datetime.now()-datetime.now(), None, datetime.now()
 
 # must be called after set_observables() has been called
 def fit_feature_weights(args):
@@ -80,7 +88,7 @@ def fit_feature_weights(args):
   iter_count = 0
   while not gradient_ascent_converged:
     log_likelihood = 0.0
-    gradient = [0.0 for weight in c]
+    gradient = defaultdict(float)
 
     # compute likelihood and gradient
     for i in xrange(len(original)):
@@ -88,49 +96,58 @@ def fit_feature_weights(args):
         # only use distorted values
         if distorted[i][l] == original[i][l]: continue
 
-        # positive enforcement 
+        # positively enforce the observed distortion
         x_value, y_value = distorted[i][l], original[i][l]
         log_likelihood += score(l, x_value, y_value)
-        if field_types[l] == str:
-          gradient[0] += compute_distortion_feature(0, x_value, y_value)
-        else:
-          gradient[1] += compute_distortion_feature(1, x_value, y_value)
+        active_features = fire_features(l, x_value, y_value)
+        for feature_id, feature_value in active_features.iteritems():
+          gradient[feature_id] += feature_value
+
+        # positively enforce no distortion
+        log_likelihood += score(l, y_value, y_value)
+        active_features = fire_features(l, y_value, y_value)
+        for feature_id, feature_value in active_features.iteritems():
+          gradient[feature_id] += feature_value
 
         # compute the partition function for the distortion model conditional on y_value
         log_partition = -300
-        for x_value in x_domain[l]:
-          log_partition = numpy.logaddexp(log_partition, score(l, x_value, y_value))
+        for other_x_value in x_domain[l]:
+          log_partition = numpy.logaddexp(log_partition, score(l, other_x_value, y_value))
           
-        # negative enforcement
-        log_likelihood -= log_partition
-        for x_value in x_domain[l]:
-          distortion_prob = math.e ** (score(l, x_value, y_value) - log_partition)
-          if field_types[l] == str:
-            gradient[0] -= distortion_prob * compute_distortion_feature(0, x_value, y_value)
-          else:
-            gradient[1] -= distortion_prob * compute_distortion_feature(1, x_value, y_value)
+        # negative enforcement (for two values: the distorted and the original)
+        log_likelihood -= 2 * log_partition
+        for other_x_value in x_domain[l]:
+          distortion_prob = math.e ** (score(l, other_x_value, y_value) - log_partition)
+          other_active_features = fire_features(l, other_x_value, y_value)
+          for feature_id, feature_value in other_active_features.iteritems():
+            gradient[feature_id] -= 2 * distortion_prob * feature_value
           # hopefully, these probabilities will keep increasing as we fit c
-          if x_value == distorted[i][l]: print 'p(', distorted[i][l], '|', original[i][l], ')=', distortion_prob
+          #if other_x_value == distorted[i][l]: print 'p(', distorted[i][l], '|', original[i][l], ')=', distortion_prob
     
+    # l2 regularization
+    for feature_id, feature_weight in c.iteritems():
+      log_likelihood -= l2_strength * (feature_weight**2)
+      gradient[feature_id] -= 2 * l2_strength * feature_weight
+
     # done computing likelihood and gradient
-    learning_rate = 0.1
-    for j in xrange(len(c)):
-      c[j] += gradient[j] * learning_rate # check the sign
+    for feature_id in c.keys():
+      c[feature_id] += gradient[feature_id] * learning_rate # check the sign
 
     print
     print 'completed gradient ascent iteration #', iter_count 
-    print 'gradient = ', gradient
-    print 'log-likelihood = ', log_likelihood
-    print 'c = ', c
+    #print 'gradient = ', gradient
+    print '|gradient|_2 = ', sum([g*g for g in gradient.values()])
+    print 'regularized log-likelihood = ', log_likelihood
+    #print 'c = ', c
+    fileinput.input()
 
     # check convergence
     iter_count += 1
-    if iter_count == 100:
+    if iter_count == 10:
       gradient_ascent_converged = True
 
   # congrat! gradient ascent has converged
   print 'done with gradient ascent'
-  exit(1)
 
 def set_observables(args):
   global x_domain, x
@@ -153,7 +170,7 @@ def set_observables(args):
         else:
           assert False
       x.append(observed_record[1:])
-      print observed_record[1:]
+      #print observed_record[1:]
   else:
     x.append( ['kartik', 10, 5.0] )
     x.append( ['waleed', 20, 10.5] )
@@ -217,16 +234,13 @@ def sample_key_from_multinomial_dict(multinomial):
     if commulative > mark:
       return k
 
-def resample_Lambda(i):
-  global Lambda, Lambda_inverse
-
-  #print 'inside resample_Lambda(', i, ')'
-  # first, compute the posterior distribution of lambda_i
-  posteriors = []
+def compute_Lambda_posteriors(posteriors, flags, i, thread_id):
   for j in xrange(m):
     # compute the posterior of p(lambda_i = j | everything else)
     posterior = 1.0
     #print 'j=', j
+    if j % threads_count != thread_id:
+      continue
     for l in xrange(len(field_types)):
       #print 'l=', l
       if z[i][l] == False:        
@@ -239,7 +253,28 @@ def resample_Lambda(i):
       else:
         #print 'z[i][l]=', z[i][l]
         posterior *= scipy.special.beta(a+1, b) * distortion[(l, y[j][l])][x[i][l]]
-    posteriors.append(posterior)
+    posteriors[j] = posterior
+    flags[j] = True
+    #print 'thread_id=', thread_id, ', flags=', flags[:threads_count]
+
+def resample_Lambda(i):
+  global Lambda, Lambda_inverse
+
+  #print 'inside resample_Lambda(', i, ')'
+  # first, compute the posterior distribution of lambda_i
+  posteriors = [0.0 for index in xrange(m)]
+  flags = [False for index in xrange(m)]
+  if threads_count != 1:
+    for thread_id in xrange(threads_count):
+      workload = (posteriors, flags, i, thread_id)
+      t = threading.Thread(target=compute_Lambda_posteriors, args=workload)
+      t.start()
+    # sync
+    while flags[0] == False or len(set(flags)) > 1: 
+      pass
+  else:
+    thread_id = 0
+    compute_Lambda_posteriors(posteriors, flags, i, thread_id)
 
   if sum(posteriors) == 0: exit(1)
   # normalize the posteriors
@@ -305,11 +340,16 @@ def resample_y(i,l):
   #print 'inside resample_y(', i, ',', l, ')'
 
 def check_convergence():
-  global iter_count
+  global iter_count, prev_timestamp, total_time, avg_time
   if iter_count %100 == 0:
     print 'iter_count = ', iter_count
     print_linkage_structure()
   print '=================== END OF ITERATION', iter_count, ' ===================='
+  if iter_count:
+    total_time += datetime.now() - prev_timestamp
+    avg_time = total_time / iter_count
+    print 'avg iteration time = ', avg_time.total_seconds()
+  prev_timestamp = datetime.now()
   iter_count += 1
   return iter_count > max_iter_count
     
@@ -329,11 +369,62 @@ def print_linkage_structure():
                                                                                                  '\n'.join([str(x[i]) for i in Lambda_inverse[j]])) 
   print 'END OF CURRENT LINKAGE STRUCTURE ====================='
 
-def score(l, x_value, y_value):
-  if field_types[l] == str:
-    return c[0] * compute_distortion_feature(0, x_value, y_value)
+def levenshtein_ratio(s1, s2):
+  return 1.0 - 1.0 * levenshtein(s1, s2) / max(len(s1), len(s2))
+
+def levenshtein(s1, s2):
+    if len(s1) < len(s2):
+        return levenshtein(s2, s1)
+ 
+    # len(s1) >= len(s2)
+    if len(s2) == 0:
+        return len(s1)
+ 
+    previous_row = range(len(s2) + 1)
+    for i, c1 in enumerate(s1):
+        current_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            insertions = previous_row[j + 1] + 1 # j+1 instead of j since previous_row and current_row are one character longer
+            deletions = current_row[j] + 1       # than s2
+            substitutions = previous_row[j] + (c1 != c2)
+            current_row.append(min(insertions, deletions, substitutions))
+        previous_row = current_row
+ 
+    return previous_row[-1]
+
+def fire_features(l, x_value, y_value):
+  active_features = {}
+
+  # fire string similarity feature, for strings of lengths > 1
+  if field_types[l] == int or field_types[l] == float:
+    active_features['{}={}:{}'.format(RELATIVE_NUMERIC_DIFF, round(1.0*abs(x_value - y_value)/max(x_domain[l]), 1), field_types[l])] = 1.0
+    x_value, y_value = str(x_value), str(y_value)
   else:
-    return c[1] * compute_distortion_feature(1, x_value, y_value)
+    x_value, y_value = x_value.lower(), y_value.lower()
+  if len(x_value) > 1 and len(y_value) > 1:
+    active_features['{}={}:{}'.format(STRING_SIMILARITY, 3 * round(levenshtein_ratio(x_value, y_value)/3, 1), field_types[l])] = 1.0
+  
+  # find different and similar characters
+  x_chars, y_chars = set(x_value), set(y_value)
+  diff_chars = (x_chars-y_chars)|(y_chars-x_chars)
+  similar_chars = x_chars & y_chars
+  active_features['{}={}:{}'.format(SIMILAR_MINUS_DIFFERENT_CHARS_COUNT, len(similar_chars)-len(diff_chars), field_types[l])] = 1.0
+  if len(diff_chars) >= 1 and len(diff_chars) <= 2 and len(diff_chars) < len(similar_chars):
+    active_features['{}={}:{}'.format(DIFFERENT_CHARS, ''.join(diff_chars), field_types[l])] = 1.0
+    pass
+
+  # substrings
+  if x_value.find(y_value) >= 0 or y_value.find(x_value) >= 0:
+    active_features['{}=1:{}'.format(SUBSTRING, field_types[l])] = 1.0
+    pass
+
+  return active_features
+
+def score(l, x_value, y_value):
+  total_score = 0.0
+  for feature_id, feature_value in fire_features(l, x_value, y_value).iteritems():
+    total_score += feature_value * c[feature_id]
+  return total_score
 
 def precompute_distortions():
   global distortions
@@ -366,7 +457,7 @@ def parse_arguments():
   args = argparser.parse_args()
   return args
 
-if __name__ == "__main__":
+def main():
   args = parse_arguments()
   set_observables(args)
   fit_feature_weights(args)
@@ -392,4 +483,8 @@ if __name__ == "__main__":
 
   print 'CONVERGED'
   print_linkage_structure()
+
+if __name__ == "__main__":
+  #main()
+  cProfile.run('main()')
 
